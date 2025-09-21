@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+
 - Initial release of PonyFmt experimental formatter
 - Tree-sitter based Pony language parsing
 - CLI with `fmt` and `debug` subcommands
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Comprehensive documentation and examples
 
 ### Known Issues
+
 - Formatting is not idempotent
 - Limited comment preservation
 - Basic error recovery for malformed source
@@ -25,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - TBD
 
 ### Added
+
 - Initial public release
 - Core formatting functionality
 - CLI interface

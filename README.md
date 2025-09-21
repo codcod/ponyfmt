@@ -1,4 +1,4 @@
-# PonyFmt - Experimental Pony Code Formatter# PonyFmt - Experimental Pony Code Formatter
+# PonyFmt - Experimental Pony Code Formatter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
