@@ -1,7 +1,7 @@
 [package]
 name = "ponyfmt"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 description = "An experimental code formatter for the Pony programming language"
 authors = ["Your Name <your.email@example.com>"]
 license = "MIT"
@@ -9,12 +9,12 @@ repository = "https://github.com/yourusername/ponyfmt"
 keywords = ["pony", "formatter", "code-formatting", "tree-sitter"]
 categories = ["development-tools", "command-line-utilities"]
 readme = "README.md"
-rust-version = "1.70"
+rust-version = "1.90"
 
 [dependencies]
 clap = { version = "4.5.4", features = ["derive"] }
 anyhow = "1.0"
-tree-sitter = "0.25"
+tree-sitter = "0.20"
 tree-sitter-pony = "1.0.0"
 walkdir = "2.5"
 rayon = "1.10"
