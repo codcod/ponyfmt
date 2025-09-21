@@ -512,21 +512,22 @@ fn handle_token_spacing(node: Node, state: &mut FormatterState, is_first: bool) 
 
         // Identifiers and literals need context-aware spacing
         "identifier" | "number" => {
-            if !is_first && !state.needs_newline {
-                if let Some(last_char) = state.output.chars().last() {
-                    match last_char {
-                        // Add space after these
-                        ',' | '=' | '+' | '-' | '*' | '/' => {
-                            state.request_space();
-                        }
-                        // Add space if last was alphanumeric (keyword/identifier)
-                        c if c.is_alphanumeric() => {
-                            state.request_space();
-                        }
-                        // No space after these
-                        '.' | '"' | '(' => {}
-                        _ => {}
+            if !is_first
+                && !state.needs_newline
+                && let Some(last_char) = state.output.chars().last()
+            {
+                match last_char {
+                    // Add space after these
+                    ',' | '=' | '+' | '-' | '*' | '/' => {
+                        state.request_space();
                     }
+                    // Add space if last was alphanumeric (keyword/identifier)
+                    c if c.is_alphanumeric() => {
+                        state.request_space();
+                    }
+                    // No space after these
+                    '.' | '"' | '(' => {}
+                    _ => {}
                 }
             }
         }
@@ -536,21 +537,19 @@ fn handle_token_spacing(node: Node, state: &mut FormatterState, is_first: bool) 
 
         // String literals need careful spacing
         "string_literal" => {
-            if !is_first {
-                if let Some(last_char) = state.output.chars().last() {
-                    match last_char {
-                        // Add space after these
-                        ',' | '=' | '+' | '-' | '*' | '/' => {
-                            state.request_space();
-                        }
-                        // Add space if last was alphanumeric (keyword/identifier)
-                        c if c.is_alphanumeric() => {
-                            state.request_space();
-                        }
-                        // No space after these
-                        '.' | '"' | '(' => {}
-                        _ => {}
+            if !is_first && let Some(last_char) = state.output.chars().last() {
+                match last_char {
+                    // Add space after these
+                    ',' | '=' | '+' | '-' | '*' | '/' => {
+                        state.request_space();
                     }
+                    // Add space if last was alphanumeric (keyword/identifier)
+                    c if c.is_alphanumeric() => {
+                        state.request_space();
+                    }
+                    // No space after these
+                    '.' | '"' | '(' => {}
+                    _ => {}
                 }
             }
         }
@@ -656,10 +655,10 @@ fn handle_child_spacing(node: Node, state: &mut FormatterState) {
         // Block nodes (like condition blocks) need space after keywords
         "block" => {
             // Add space if the last token was a keyword like "if"
-            if let Some(last_chars) = state.output.get(state.output.len().saturating_sub(2)..) {
-                if last_chars == "if" {
-                    state.request_space();
-                }
+            if let Some(last_chars) = state.output.get(state.output.len().saturating_sub(2)..)
+                && last_chars == "if"
+            {
+                state.request_space();
             }
         }
 

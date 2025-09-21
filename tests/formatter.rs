@@ -1,4 +1,4 @@
-use ponyfmt::formatter::{format_source, FormatOptions, Mode};
+use ponyfmt::formatter::{FormatOptions, Mode, format_source};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
@@ -29,12 +29,12 @@ fn find_test_cases() -> Vec<TestCase> {
         }
 
         // Look for input files with new pattern: *_*.input
-        if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
-            if file_name.ends_with(".input") && file_name.contains('_') {
-                if let Some(test_case) = create_test_case(path) {
-                    test_cases.push(test_case);
-                }
-            }
+        if let Some(file_name) = path.file_name().and_then(|n| n.to_str())
+            && file_name.ends_with(".input")
+            && file_name.contains('_')
+            && let Some(test_case) = create_test_case(path)
+        {
+            test_cases.push(test_case);
         }
     }
 
