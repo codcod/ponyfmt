@@ -1,0 +1,21 @@
+/*
+Main program wiring for the example application.
+
+This file constructs the gateways, router, processor and receiver
+actors and starts a small HTTP server (see `web/server.pony`) that
+accepts POST requests to create messages. It also contains a small
+demo sequence that sends a few example messages to exercise the
+pipeline.
+
+This file is an executable entry point when compiled as a Pony
+program; it intentionally performs only wiring and demos — the
+application logic lives in other modules (`receiver.pony`,
+`message.pony`, and the `gateways/` actors).
+*/
+
+actor Main
+  new create(env: Env) =>
+    let em = EmailMessage.create(1, "alice@example.com", "Welcome aboard!", "Hello Alice")
+    if true then
+      env.out.print(em.subject())
+    end

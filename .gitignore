@@ -1,0 +1,7 @@
+target/
+
+# Include pony files in subdirectories
+!**/*.pony
+
+# But exclude *.pony files in the root directory
+/*.pony

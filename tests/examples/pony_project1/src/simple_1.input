@@ -1,0 +1,5 @@
+actor Main
+new create(env: Env) =>
+if true then
+env.out.print("yes")
+end
