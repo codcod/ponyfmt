@@ -122,14 +122,14 @@ jobs:
             ### Cargo Install
 
             ```bash
-            cargo install repos
+            cargo install ponyfmt
             ```
 
             ### From Source
 
             ```bash
             git clone https://github.com/${{ github.repository }}.git
-            cd repos
+            cd ponyfmt
             cargo build --release
             ```
 
@@ -189,22 +189,22 @@ jobs:
         run: |
           cargo build --release --target ${{ matrix.target }}
           if [[ "${{ matrix.target }}" == *"windows"* ]]; then
-            mv target/${{ matrix.target }}/release/repos.exe repos-${{ matrix.target }}.exe
+            mv target/${{ matrix.target }}/release/ponyfmt.exe ponyfmt-${{ matrix.target }}.exe
           else
-            mv target/${{ matrix.target }}/release/repos repos-${{ matrix.target }}
+            mv target/${{ matrix.target }}/release/ponyfmt ponyfmt-${{ matrix.target }}
           fi
 
       - name: Strip binary (Unix only)
         if: matrix.suffix == ''
-        run: strip target/${{ matrix.target }}/release/repos${{ matrix.suffix }}
+        run: strip target/${{ matrix.target }}/release/ponyfmt${{ matrix.suffix }}
 
       - name: Create archive
         shell: bash
         run: |
-          staging="repos-${{ needs.semantic-version.outputs.version }}-${{ matrix.target }}"
+          staging="ponyfmt-${{ needs.semantic-version.outputs.version }}-${{ matrix.target }}"
           mkdir -p "$staging"
 
-          cp target/${{ matrix.target }}/release/repos${{ matrix.suffix }} "$staging/"
+          cp target/${{ matrix.target }}/release/ponyfmt${{ matrix.suffix }} "$staging/"
           cp README.md LICENSE* "$staging/" 2>/dev/null || true
 
           tar czf "$staging.tar.gz" "$staging"
