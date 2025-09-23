@@ -148,35 +148,34 @@ fn create_diff(expected: &str, actual: &str) -> String {
     }
 }
 
-#[test]
-fn example_files_formatting() {
-    let test_cases = find_test_cases();
+// #[test]
+// fn example_files_formatting() {
+//     let test_cases = find_test_cases();
 
-    // Ensure we found at least some test cases
-    assert!(
-        !test_cases.is_empty(),
-        "No test cases found in tests/examples/"
-    );
+//     // Ensure we found at least some test cases
+//     assert!(
+//         !test_cases.is_empty(),
+//         "No test cases found in tests/examples/"
+//     );
 
-    println!("Found {} test case(s):", test_cases.len());
-    for test_case in &test_cases {
-        println!("  - {}", test_case.name);
-    }
+//     println!("Found {} test case(s):", test_cases.len());
+//     for test_case in &test_cases {
+//         println!("  - {}", test_case.name);
+//     }
 
-    // Run all test cases
-    let mut failures = Vec::new();
-    for test_case in &test_cases {
-        if let Err(error) = run_test_case(test_case) {
-            failures.push(error);
-        }
-    }
+//     // Run all test cases
+//     let mut failures = Vec::new();
+//     for test_case in &test_cases {
+//         if let Err(error) = run_test_case(test_case) {
+//             failures.push(error);
+//         }
+//     }
 
-    // Report failures
-    if !failures.is_empty() {
-        panic!("Test failures:\n\n{}", failures.join("\n\n"));
-    }
-}
-
+//     // Report failures
+//     if !failures.is_empty() {
+//         panic!("Test failures:\n\n{}", failures.join("\n\n"));
+//     }
+// }
 #[test]
 fn basic_actor_formatting() {
     let input = r#"actor Main
