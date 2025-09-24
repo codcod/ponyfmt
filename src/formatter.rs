@@ -1,36 +1,17 @@
 //! Core formatting engine for Pony source code
 //!
 //! This module contains the main formatting logic that transforms parsed Pony AST
-//! nodes into formatted source code. The formatter implements indentation rules,
-//! spacing conventions, and other style guidelines for Pony code.
-//!
-//! # Example
-//!
-//! ```rust
-//! use ponyfmt::formatter::{FormatOptions, Mode, format_source};
-//!
-//! let unformatted = r#"
-//! actor Main
-//! new create(env:Env)=>
-//! env.out.print("test")
-//! "#;
-//!
-//! let opts = FormatOptions {
-//!     indent_width: 2,
-//!     mode: Mode::Stdout,
-//! };
-//!
-//! let formatted = format_source(unformatted, &opts).unwrap();
-//! // Result will have proper indentation and spacing
-//! ```
+//! nodes into formatted source code following Pony conventions:
+//! - 2-space indentation for all nested content
+//! - Blank lines after block comments
+//! - Proper spacing around operators and keywords
+//! - Class/actor members indented within their containers
 
 use crate::parser::parse;
 use anyhow::Result;
-use tree_sitter::{Node, TreeCursor};
+use tree_sitter::Node;
 
 /// Output mode for the formatter
-///
-/// Determines how the formatted code should be handled after processing.
 #[derive(Clone, Copy, Debug)]
 pub enum Mode {
     /// Print formatted code to stdout
@@ -42,22 +23,8 @@ pub enum Mode {
 }
 
 /// Configuration options for the formatter
-///
-/// Controls various aspects of the formatting behavior including indentation
-/// and output mode.
-///
-/// # Example
-///
-/// ```rust
-/// use ponyfmt::formatter::{FormatOptions, Mode};
-///
-/// let opts = FormatOptions {
-///     indent_width: 4,  // Use 4 spaces for indentation
-///     mode: Mode::Write,  // Write changes back to files
-/// };
-/// ```
 pub struct FormatOptions {
-    /// Number of spaces to use for each indentation level
+    /// Number of spaces to use for each indentation level (defaults to 2 for Pony)
     pub indent_width: usize,
     /// How to handle the formatted output
     pub mode: Mode,
@@ -72,15 +39,12 @@ impl Default for FormatOptions {
     }
 }
 
+/// Simple formatter state that tracks indentation and output
 #[derive(Debug)]
 struct FormatterState {
     output: String,
     indent_level: usize,
-    last_byte: usize,
-    needs_newline: bool,
-    needs_space: bool,
-    in_conditional_context: bool,
-    conditional_base_indent: Option<usize>,
+    current_line_has_content: bool,
 }
 
 impl FormatterState {
@@ -88,642 +52,829 @@ impl FormatterState {
         Self {
             output: String::new(),
             indent_level: 0,
-            last_byte: 0,
-            needs_newline: false,
-            needs_space: false,
-            in_conditional_context: false,
-            conditional_base_indent: None,
+            current_line_has_content: false,
         }
     }
 
     fn write_indent(&mut self, opts: &FormatOptions) {
-        if self.needs_newline {
-            self.output.push('\n');
-            self.output
-                .push_str(&" ".repeat(self.indent_level * opts.indent_width));
-            self.needs_newline = false;
-            self.needs_space = false;
-        } else if self.needs_space {
-            self.output.push(' ');
-            self.needs_space = false;
+        if !self.current_line_has_content {
+            for _ in 0..(self.indent_level * opts.indent_width) {
+                self.output.push(' ');
+            }
         }
     }
 
-    fn write_token(&mut self, text: &str, opts: &FormatOptions) {
-        self.write_indent(opts);
+    fn write_text(&mut self, text: &str) {
         self.output.push_str(text);
+        self.current_line_has_content = true;
+    }
 
-        // Add space after certain tokens
-        match text {
-            "=" | "," | "|" | ";" => {
-                self.request_space();
-            }
-            // Add space after keywords that are typically followed by other tokens
-            "use" | "trait" | "class" | "actor" | "primitive" | "new" | "fun" | "let" | "var"
-            | "is" => {
-                self.request_space();
-            }
-            _ => {}
+    fn write_newline(&mut self) {
+        self.output.push('\n');
+        self.current_line_has_content = false;
+    }
+
+    fn write_blank_line(&mut self) {
+        if self.current_line_has_content {
+            self.write_newline();
         }
+        self.write_newline();
     }
 
-    fn request_newline(&mut self) {
-        self.needs_newline = true;
+    fn increase_indent(&mut self) {
+        self.indent_level += 1;
     }
 
-    fn request_space(&mut self) {
-        if !self.needs_newline {
-            self.needs_space = true;
+    fn decrease_indent(&mut self) {
+        if self.indent_level > 0 {
+            self.indent_level -= 1;
         }
     }
 }
 
 /// Format Pony source code according to style conventions
-///
-/// This is the main entry point for the formatter. It parses the input source code
-/// into an AST using tree-sitter and then walks the tree to generate formatted output
-/// according to the provided options.
-///
-/// # Arguments
-///
-/// * `input` - The Pony source code to format
-/// * `opts` - Configuration options controlling formatting behavior
-///
-/// # Returns
-///
-/// Returns a `Result` containing the formatted source code as a `String`, or an error
-/// if parsing or formatting fails.
-///
-/// # Errors
-///
-/// This function will return an error if:
-/// - The input source code cannot be parsed by tree-sitter
-/// - Internal formatting logic encounters an unrecoverable error
-///
-/// # Example
-///
-/// ```rust
-/// use ponyfmt::formatter::{FormatOptions, Mode, format_source};
-///
-/// let source = r#"
-/// actor Main
-/// new create(env:Env)=>
-/// env.out.print("Hello")
-/// "#;
-///
-/// let opts = FormatOptions {
-///     indent_width: 2,
-///     mode: Mode::Stdout,
-/// };
-///
-/// let formatted = format_source(source, &opts).unwrap();
-/// assert!(formatted.contains("  new create(env: Env) =>"));
-/// ```
-///
-/// # Current Limitations
-///
-/// - Formatting is not idempotent (multiple runs may produce different results)
-/// - Comment positioning may not be preserved perfectly
-/// - Some complex expressions may not format optimally
-/// - Error recovery for malformed source is limited
 pub fn format_source(input: &str, opts: &FormatOptions) -> Result<String> {
     let tree = parse(input)?;
+    let root_node = tree.root_node();
     let mut state = FormatterState::new();
-    let mut cursor = tree.walk();
 
-    format_node(&mut cursor, input.as_bytes(), &mut state, opts);
-
-    // Add trailing newline for proper file formatting
-    if !state.output.is_empty() && !state.output.ends_with('\n') {
-        state.output.push('\n');
-    }
+    format_node(root_node, input.as_bytes(), &mut state, opts);
 
     Ok(state.output)
 }
 
-fn format_node(
-    cursor: &mut TreeCursor,
-    source: &[u8],
-    state: &mut FormatterState,
-    opts: &FormatOptions,
-) {
-    format_node_impl(cursor, source, state, opts, true);
+fn format_arguments(node: Node, source: &[u8], state: &mut FormatterState, _opts: &FormatOptions) {
+    // Extract all the text content and reformat on a single line
+    let full_text = node_text(node, source);
+
+    // Remove the parentheses and extract the content
+    let content = full_text.strip_prefix('(').unwrap_or(&full_text);
+    let content = content.strip_suffix(')').unwrap_or(content);
+
+    // Split by commas and clean up each argument
+    let args: Vec<&str> = content
+        .split(',')
+        .map(|arg| arg.trim())
+        .filter(|arg| !arg.is_empty())
+        .collect();
+
+    // Write formatted arguments
+    state.write_text("(");
+    for (i, arg) in args.iter().enumerate() {
+        if i > 0 {
+            state.write_text(", ");
+        }
+        state.write_text(arg);
+    }
+    state.write_text(")");
 }
 
-fn handle_intervening_content(
-    source: &[u8],
-    state: &mut FormatterState,
-    start: usize,
-    end: usize,
-    _opts: &FormatOptions,
-) {
-    if start < end && start < source.len() {
-        let slice = &source[start..end.min(source.len())];
-        if let Ok(text) = std::str::from_utf8(slice) {
-            // Check for significant whitespace that should be preserved
-            let has_newlines = text.contains('\n');
-            let is_just_whitespace = text.trim().is_empty();
+fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &FormatOptions) {
+    match node.kind() {
+        "source_file" => {
+            // Handle the root of the file
 
-            if !is_just_whitespace {
-                // There's non-whitespace content (like comments) - preserve it
-                state.output.push_str(text.trim_start());
-            }
+            let mut prev_kind: Option<&str> = None;
 
-            // If there were newlines and we have content after, preserve some spacing
-            if has_newlines && !state.output.is_empty() {
-                let needs_separation =
-                    !state.output.ends_with('\n') && !state.output.ends_with(' ');
-                if needs_separation {
-                    state.request_newline();
-                }
-            }
-        }
-    }
-    state.last_byte = end;
-}
+            for child in node.children(&mut node.walk()) {
+                let current_kind = child.kind();
 
-fn format_node_impl(
-    cursor: &mut TreeCursor,
-    source: &[u8],
-    state: &mut FormatterState,
-    opts: &FormatOptions,
-    is_first_sibling: bool,
-) {
-    let node = cursor.node();
-
-    // Handle whitespace and comments between last position and this node
-    handle_intervening_content(source, state, state.last_byte, node.start_byte(), opts);
-
-    if node.child_count() == 0 {
-        // Leaf node - write the token
-        if let Ok(text) = node.utf8_text(source) {
-            handle_token_spacing(node, state, is_first_sibling);
-            state.write_token(text, opts);
-
-            // Handle post-token formatting
-            let node_kind = node.kind();
-            if node_kind == "block_comment" || node_kind == "line_comment" {
-                // Add double newline after comments for proper separation
-                state.request_newline();
-                state.request_newline();
-            }
-        }
-    } else {
-        // Non-leaf node - handle formatting rules
-        handle_node_formatting(cursor, source, state, opts);
-    }
-
-    state.last_byte = node.end_byte();
-}
-
-fn handle_node_formatting(
-    cursor: &mut TreeCursor,
-    source: &[u8],
-    state: &mut FormatterState,
-    opts: &FormatOptions,
-) {
-    let node = cursor.node();
-    let node_kind = node.kind();
-
-    // Handle top-level constructs - add newlines between them
-    if matches!(
-        node_kind,
-        "actor_definition"
-            | "class_definition"
-            | "trait_definition"
-            | "primitive_definition"
-            | "struct_definition"
-            | "interface_definition"
-            | "object_definition"
-            | "use_statement"
-            | "type_alias"
-    ) {
-        // Reset indent level for top-level constructs
-        state.indent_level = 0;
-
-        if !state.output.is_empty() {
-            // Ensure we have at least one newline before top-level declarations
-            if !state.output.ends_with('\n') {
-                state.request_newline();
-            }
-            // Add an extra newline for proper separation (except after comments)
-            if !state.output.trim_end().ends_with("*/") {
-                state.request_newline();
-            }
-        }
-    }
-
-    // Handle newlines and indentation for various constructs
-    match node_kind {
-        "method" | "constructor" | "behavior" | "function" => {
-            state.request_newline();
-            state.indent_level = 1; // Methods are indented one level inside classes/actors
-        }
-        "class_definition" | "actor_definition" | "trait_definition" => {
-            // Class/actor body content should be indented
-            state.indent_level = 0; // Reset for the class declaration itself
-        }
-        _ => {}
-    }
-
-    // Handle comment blocks - ensure newline after
-    if node_kind == "comment" {
-        // Comments will be handled in the intervening content, but ensure newline after
-    }
-
-    // Handle arguments - force single line formatting for simple function calls
-    if node_kind == "arguments" {
-        // Always try single line formatting for now
-        handle_single_line_arguments(cursor, source, state, opts);
-        return;
-    }
-
-    if cursor.goto_first_child() {
-        let mut first_child = true;
-        let mut found_arrow = false;
-        let mut in_class_body = false;
-
-        // Track if we're entering a class/actor/trait body
-        if matches!(
-            node_kind,
-            "class_definition" | "actor_definition" | "trait_definition"
-        ) {
-            in_class_body = true;
-        }
-
-        loop {
-            let child_node = cursor.node();
-            let child_kind = child_node.kind();
-
-            // Handle spacing before child nodes
-            if !first_child {
-                handle_child_spacing(child_node, state);
-            }
-
-            // Special indentation handling for class body elements
-            if in_class_body
-                && matches!(
-                    child_kind,
-                    "let_declaration"
-                        | "var_declaration"
-                        | "method"
-                        | "constructor"
-                        | "behavior"
-                        | "function"
-                )
-            {
-                if !first_child {
-                    state.request_newline();
-                }
-                state.indent_level = 1; // Indent class members
-            }
-
-            // Special handling for conditional context in ERROR nodes only
-            if state.in_conditional_context
-                && child_kind == "identifier"
-                && state.output.ends_with("then")
-                && node_kind == "ERROR"
-            {
-                state.request_newline();
-                state.conditional_base_indent = Some(state.indent_level);
-                state.indent_level += 1;
-                state.in_conditional_context = false; // Reset after handling
-            }
-
-            // Special handling for if_statement blocks
-            if node_kind == "if_statement" && child_kind == "then_block" {
-                // Ensure space before then_block
-                state.request_space();
-            }
-
-            // Special handling for arrow (=>) - check if this should be a single-line function
-            if child_kind == "=>" {
-                handle_token_spacing(child_node, state, first_child);
-                if let Ok(text) = child_node.utf8_text(source) {
-                    state.write_token(text, opts);
-
-                    // Check if this is a simple single-line function body by looking ahead
-                    let should_be_single_line = {
-                        let mut temp_cursor = cursor.node().walk();
-                        temp_cursor.goto_first_child();
-                        while temp_cursor.node().kind() != "=>" {
-                            if !temp_cursor.goto_next_sibling() {
-                                break;
-                            }
+                // Add blank lines between different types of top-level declarations
+                if let Some(prev) = prev_kind {
+                    let needs_blank_line = match (prev, current_kind) {
+                        // Always add blank line after block comments (unless next is also a comment)
+                        ("block_comment", kind)
+                            if kind != "block_comment" && kind != "line_comment" =>
+                        {
+                            true
                         }
-                        if temp_cursor.goto_next_sibling() {
-                            let next_node = temp_cursor.node();
-                            next_node.child_count() <= 2
-                                && next_node
-                                    .utf8_text(source)
-                                    .is_ok_and(|text| text.len() < 40 && !text.contains('\n'))
-                        } else {
-                            false
+                        // Add blank lines between different declaration types
+                        ("primitive_definition", kind)
+                            if kind != "primitive_definition" && kind != "line_comment" =>
+                        {
+                            true
                         }
+                        ("type_alias", kind) if kind != "type_alias" && kind != "line_comment" => {
+                            true
+                        }
+                        ("trait_definition", kind)
+                            if kind != "trait_definition" && kind != "line_comment" =>
+                        {
+                            true
+                        }
+                        ("class_definition", kind) if kind != "line_comment" => true,
+                        // Add blank line before line comments that come after class definitions
+                        ("class_definition", "line_comment")
+                        | ("trait_definition", "line_comment")
+                        | ("primitive_definition", "line_comment") => true,
+                        // Add blank line before first declaration after use statements
+                        ("use_statement", kind)
+                            if kind != "use_statement" && kind != "line_comment" =>
+                        {
+                            true
+                        }
+                        _ => false,
                     };
 
-                    if should_be_single_line {
-                        state.request_space();
-                    } else {
-                        state.request_newline();
-                        state.indent_level += 1; // Increase indent for method body
+                    if needs_blank_line {
+                        state.write_blank_line();
                     }
-                    found_arrow = true;
                 }
-                state.last_byte = child_node.end_byte();
-            } else if child_kind == "then_block" || child_kind == "else_block" {
-                // Handle then/else blocks with special newline and indentation
-                if cursor.goto_first_child() {
-                    let mut is_first_in_block = true;
-                    loop {
-                        let grandchild = cursor.node();
-                        let grandchild_kind = grandchild.kind();
 
-                        if grandchild_kind == "then" || grandchild_kind == "else" {
-                            // Write the keyword at current level
-                            format_node_impl(cursor, source, state, opts, is_first_in_block);
-                        } else if grandchild_kind == "block" {
-                            // Content block should be indented and on new line
-                            state.request_newline();
-                            let original_indent = state.indent_level;
-                            state.indent_level += 1;
-                            format_node_impl(cursor, source, state, opts, false);
-                            state.indent_level = original_indent;
-                        } else {
-                            // Other content
-                            format_node_impl(cursor, source, state, opts, is_first_in_block);
+                format_node(child, source, state, opts);
+                prev_kind = Some(current_kind);
+            }
+        }
+
+        "block_comment" | "line_comment" => {
+            let text = node_text(node, source);
+            state.write_indent(opts);
+            state.write_text(&text);
+            state.write_newline();
+        }
+
+        "use_statement" => {
+            state.write_indent(opts);
+            state.write_text("use ");
+
+            // Find and format the string literal
+            for child in node.children(&mut node.walk()) {
+                if child.kind() == "string" {
+                    let target_text = node_text(child, source);
+                    state.write_text(&target_text);
+                    break;
+                }
+            }
+            state.write_newline();
+        }
+
+        "actor_definition" | "class_definition" => {
+            state.write_indent(opts);
+
+            // Handle actor/class keyword and name
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "actor" | "class" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
                         }
+                        "capability" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            // This is the type name
+                            state.write_text(&node_text(child, source));
+                        }
+                        "is" => {
+                            state.write_text(" is ");
+                        }
+                        "base_type" => {
+                            // This is the parent type name
+                            state.write_text(&node_text(child, source));
+                        }
+                        "members" => {
+                            // Now handle the body
+                            state.write_newline();
+                            state.increase_indent();
+                            format_node(child, source, state, opts);
+                            state.decrease_indent();
+                        }
+                        _ => {}
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
 
-                        is_first_in_block = false;
-                        if !cursor.goto_next_sibling() {
-                            break;
+        "trait_definition" => {
+            state.write_indent(opts);
+
+            // Handle trait keyword and name
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "trait" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "capability" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        "members" => {
+                            state.write_newline();
+                            state.increase_indent();
+                            format_node(child, source, state, opts);
+                            state.decrease_indent();
+                        }
+                        _ => {}
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        "primitive_definition" => {
+            state.write_indent(opts);
+
+            // Handle primitive keyword and name
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "primitive" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        _ => {}
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+            state.write_newline();
+        }
+
+        "type_definition" => {
+            state.write_indent(opts);
+            state.write_text("type ");
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "identifier" {
+                        state.write_text(&node_text(child, source));
+                        break;
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+
+            // Find the "is" part and the type union
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    if child.kind() == "is" {
+                        state.write_text(" is ");
+                        // Find the next significant node (the type union)
+                        if cursor.goto_next_sibling() {
+                            let union_node = cursor.node();
+                            state.write_text(&node_text(union_node, source));
+                        }
+                        break;
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+            state.write_newline();
+        }
+
+        "type_alias" => {
+            state.write_indent(opts);
+            state.write_text("type ");
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        "is" => {
+                            state.write_text(" is ");
+                        }
+                        "union_type" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        _ => {}
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+            state.write_newline();
+        }
+        "members" => {
+            // Handle members of a type (fields, constructors, functions)
+            for child in node.children(&mut node.walk()) {
+                format_node(child, source, state, opts);
+            }
+        }
+
+        "field" => {
+            state.write_indent(opts);
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "let" | "var" | "embed" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        ":" => {
+                            state.write_text(": ");
+                        }
+                        "base_type" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        "=" => {
+                            state.write_text(" = ");
+                        }
+                        _ => {
+                            // For default values
+                            if child.kind() != "let"
+                                && child.kind() != "var"
+                                && child.kind() != "embed"
+                                && child.kind() != "identifier"
+                                && child.kind() != ":"
+                                && child.kind() != "="
+                                && child.kind() != "base_type"
+                            {
+                                state.write_text(&node_text(child, source));
+                            }
                         }
                     }
-                    cursor.goto_parent();
-                } else {
-                    // Fallback
-                    format_node_impl(cursor, source, state, opts, first_child);
-                }
-            } else {
-                format_node_impl(cursor, source, state, opts, first_child);
-            }
-
-            first_child = false;
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-
-        // Restore indent level after processing method body or class body
-        if found_arrow {
-            state.indent_level = state.indent_level.saturating_sub(1);
-        }
-
-        // Reset indent level after class/actor/trait definition
-        if in_class_body {
-            state.indent_level = 0;
-        }
-
-        cursor.goto_parent();
-    }
-}
-
-fn handle_token_spacing(node: Node, state: &mut FormatterState, is_first: bool) {
-    let kind = node.kind();
-
-    match kind {
-        // No space before these punctuation tokens
-        "(" | ")" | "[" | "]" | ";" | "." | ":" => {}
-
-        // Comma needs space after (we'll handle this by adding space for next token)
-        "," => {}
-
-        // Assignment operator needs space before and after
-        "=" => {
-            if !is_first {
-                state.request_space();
-            }
-        }
-
-        // String quotes - no space before or after
-        "\"" => {
-            // No additional spacing for quotes
-        }
-
-        // Identifiers and literals need context-aware spacing
-        "identifier" | "number" => {
-            if !is_first
-                && !state.needs_newline
-                && let Some(last_char) = state.output.chars().last()
-            {
-                match last_char {
-                    // Add space after these
-                    ',' | '=' | '+' | '-' | '*' | '/' => {
-                        state.request_space();
+                    if !cursor.goto_next_sibling() {
+                        break;
                     }
-                    // Add space if last was alphanumeric (keyword/identifier)
-                    c if c.is_alphanumeric() => {
-                        state.request_space();
-                    }
-                    // No space after these
-                    '.' | '"' | '(' => {}
-                    _ => {}
                 }
             }
+            state.write_newline();
         }
 
-        // String content should not have extra spacing
-        "string_content" => {}
+        "field_definition" => {
+            state.write_indent(opts);
 
-        // String literals need careful spacing
-        "string_literal" => {
-            if !is_first && let Some(last_char) = state.output.chars().last() {
-                match last_char {
-                    // Add space after these
-                    ',' | '=' | '+' | '-' | '*' | '/' => {
-                        state.request_space();
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "let" | "var" | "embed" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        ":" => {
+                            state.write_text(": ");
+                        }
+                        "=" => {
+                            state.write_text(" = ");
+                        }
+                        _ => {
+                            // For type annotations and default values
+                            if child.kind() != "let"
+                                && child.kind() != "var"
+                                && child.kind() != "embed"
+                                && child.kind() != "identifier"
+                                && child.kind() != ":"
+                                && child.kind() != "="
+                            {
+                                state.write_text(&node_text(child, source));
+                            }
+                        }
                     }
-                    // Add space if last was alphanumeric (keyword/identifier)
-                    c if c.is_alphanumeric() => {
-                        state.request_space();
+                    if !cursor.goto_next_sibling() {
+                        break;
                     }
-                    // No space after these
-                    '.' | '"' | '(' => {}
-                    _ => {}
+                }
+            }
+            state.write_newline();
+        }
+        "method" => {
+            state.write_indent(opts);
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "fun" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        "parameters" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        ":" => {
+                            state.write_text(": ");
+                        }
+                        "base_type" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        "=>" => {
+                            state.write_text(" =>");
+                        }
+                        "block" => {
+                            // For simple single-expression blocks, keep on same line
+                            let block_text = node_text(child, source);
+                            let trimmed = block_text.trim();
+                            if trimmed.lines().count() == 1 && trimmed.len() < 50 {
+                                // Simple one-liner, keep on same line
+                                state.write_text(" ");
+                                state.write_text(trimmed);
+                            } else {
+                                // Multi-line or complex block, indent
+                                state.write_newline();
+                                state.increase_indent();
+                                format_node(child, source, state, opts);
+                                state.decrease_indent();
+                            }
+                        }
+                        _ => {}
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+            state.write_newline();
+        }
+
+        "constructor" | "function_definition" => {
+            state.write_indent(opts);
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "new" | "fun" | "be" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "val" | "ref" | "iso" | "trn" | "box" | "tag" => {
+                            // Skip - these are handled by their parent capability node
+                        }
+                        "capability" => {
+                            // This handles val, ref, iso, trn, box, tag
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        "parameters" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        ":" => {
+                            state.write_text(": ");
+                        }
+                        "=>" => {
+                            state.write_text(" =>");
+                        }
+                        "block" => {
+                            // Format the method body - always put it on new line and indent
+                            state.write_newline();
+                            state.increase_indent();
+                            format_node(child, source, state, opts);
+                            state.decrease_indent();
+                        }
+                        _ => {
+                            // Handle return type annotations
+                            if child.kind() != "new"
+                                && child.kind() != "fun"
+                                && child.kind() != "be"
+                                && child.kind() != "identifier"
+                                && child.kind() != "parameters"
+                                && child.kind() != ":"
+                                && child.kind() != "=>"
+                                && child.kind() != "block"
+                                && child.kind() != "capability"
+                                && child.kind() != "val"
+                                && child.kind() != "ref"
+                                && child.kind() != "iso"
+                                && child.kind() != "trn"
+                                && child.kind() != "box"
+                                && child.kind() != "tag"
+                            {
+                                state.write_text(&node_text(child, source));
+                            }
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
                 }
             }
         }
 
-        // Operators usually need space
-        "+" | "-" | "*" | "/" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "|" => {
-            if !is_first {
-                state.request_space();
+        "if_statement" => {
+            state.write_indent(opts);
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "if_block" => {
+                            // Handle "if condition"
+                            format_if_block(child, source, state, opts);
+                        }
+                        "then_block" => {
+                            // Handle "then body"
+                            format_then_block(child, source, state, opts);
+                        }
+                        "end" => {
+                            state.write_indent(opts);
+                            state.write_text("end");
+                            state.write_newline();
+                        }
+                        _ => {}
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
             }
         }
 
-        // Arrow operator needs space before
-        "=>" => {
-            if !is_first {
-                state.request_space();
-            }
-        }
-
-        // Keywords and boolean literals need space before them
-        "actor" | "class" | "trait" | "new" | "fun" | "be" | "if" | "else" | "while" | "for"
-        | "match" | "let" | "var" | "true" | "false" | "and" | "or" | "not" | "primitive"
-        | "use" | "is" | "val" => {
-            if !is_first {
-                state.request_space();
-            }
-        }
-
-        // Special handling for "then" - add space before and set conditional context for ERROR nodes
-        "then" => {
-            if !is_first {
-                state.request_space();
-            }
-            // Set conditional context flag for indentation in ERROR nodes
-            state.in_conditional_context = true;
-        }
-
-        // Special handling for "end" - restore indentation for ERROR nodes
-        "end" => {
-            if !is_first {
-                state.request_newline();
-            }
-            // For ERROR nodes, restore the saved base indentation level
-            if let Some(base_indent) = state.conditional_base_indent {
-                state.indent_level = base_indent;
-                state.conditional_base_indent = None;
-            }
-        }
-
-        _ => {
-            // Default case: check if we should add space
-            if !is_first && should_add_space_before_default(state) {
-                state.request_space();
-            }
-        }
-    }
-}
-
-fn should_add_space_before_identifier(state: &FormatterState) -> bool {
-    if let Some(last_char) = state.output.chars().last() {
-        match last_char {
-            // Add space after these characters
-            '(' | '[' | ',' | ':' | '=' | '+' | '-' | '*' | '/' | '<' | '>' => true,
-            // Don't add space after these
-            '.' | '"' => false,
-            // Add space if the last character is alphanumeric (identifiers, keywords)
-            c if c.is_alphanumeric() => true,
-            _ => false,
-        }
-    } else {
-        false
-    }
-}
-
-fn should_add_space_before_default(state: &FormatterState) -> bool {
-    // Conservative spacing for unknown tokens
-    if let Some(last_char) = state.output.chars().last() {
-        matches!(last_char, ' ' | '\t') // Only if we already have whitespace
-    } else {
-        false
-    }
-}
-
-fn handle_child_spacing(node: Node, state: &mut FormatterState) {
-    let kind = node.kind();
-
-    match kind {
-        // No space before punctuation
-        "(" | ")" | "[" | "]" | "," | ";" | "." | ":" => {}
-
-        // Arrow operator gets space before
-        "=>" => {
-            state.request_space();
-        }
-
-        // Type annotations: space after colon
-        _ if matches!(kind, "base_type" | "type") => {
-            // Check if previous token was a colon
-            if state.output.ends_with(':') {
-                state.request_space();
-            }
-        }
-
-        // Block nodes (like condition blocks) need space after keywords
         "block" => {
-            // Add space if the last token was a keyword like "if"
-            if let Some(last_chars) = state.output.get(state.output.len().saturating_sub(2)..)
-                && last_chars == "if"
-            {
-                state.request_space();
-            }
-        }
+            // Check if this is a block of simple assignments that should be on one line
+            let children: Vec<_> = node.children(&mut node.walk()).collect();
 
-        // Most identifiers and keywords benefit from spacing in certain contexts
-        "identifier" | "new" | "fun" | "be" | "if" | "then" | "else" | "while" | "for"
-        | "match" | "end" | "let" | "var" | "true" | "false" | "and" | "or" | "not" => {
-            if !state.needs_newline && should_add_space_before_identifier(state) {
-                state.request_space();
-            }
-        }
+            // Check if this block contains only assignment_expression and ; nodes
+            let is_simple_assignments = children
+                .iter()
+                .all(|child| matches!(child.kind(), "assignment_expression" | ";"));
 
-        _ => {
-            // Default: minimal spacing
-        }
-    }
-}
-
-fn handle_single_line_arguments(
-    cursor: &mut TreeCursor,
-    source: &[u8],
-    state: &mut FormatterState,
-    opts: &FormatOptions,
-) {
-    // Force all arguments to be on a single line with proper spacing
-    if cursor.goto_first_child() {
-        let mut is_first = true;
-        let mut tokens = Vec::new();
-
-        // Collect all tokens first
-        loop {
-            let child_node = cursor.node();
-            if let Ok(text) = child_node.utf8_text(source) {
-                tokens.push((child_node.kind(), text.to_owned()));
-            }
-
-            if !cursor.goto_next_sibling() {
-                break;
-            }
-        }
-
-        // Format tokens with proper spacing, ignoring original newlines
-        for (kind, text) in tokens {
-            if !is_first {
-                match kind {
-                    "(" | ")" | "\"" => {} // No space before punctuation and quotes
-                    "," => {}              // No space before comma
-                    _ => {
-                        // Only add space if the previous token was not an opening paren
-                        if !state.output.ends_with('(') {
-                            state.request_space();
+            if is_simple_assignments && children.len() > 2 {
+                // Format multiple assignments on one line
+                state.write_indent(opts);
+                let mut first = true;
+                for child in children {
+                    match child.kind() {
+                        "assignment_expression" => {
+                            if !first {
+                                state.write_text(" ");
+                            }
+                            state.write_text(&node_text(child, source));
+                            first = false;
                         }
+                        ";" => {
+                            state.write_text(";");
+                        }
+                        _ => {}
+                    }
+                }
+                state.write_newline();
+            } else {
+                // Handle general blocks normally
+                for child in children {
+                    format_node(child, source, state, opts);
+                }
+            }
+        }
+
+        "call_expression" => {
+            // Check if this is a standalone call expression (direct child of block, not part of assignment)
+            let parent = node.parent();
+            let grandparent = parent.and_then(|p| p.parent());
+            let is_standalone = parent.is_none()
+                || (parent.is_some_and(|p| p.kind() == "block")
+                    && grandparent.is_some_and(|gp| !matches!(gp.kind(), "assignment_expression")));
+
+            if is_standalone {
+                state.write_indent(opts);
+            }
+
+            // Format function calls more intelligently
+            for child in node.children(&mut node.walk()) {
+                match child.kind() {
+                    "member_expression" => {
+                        // This is the function name (e.g., EmailMessage.create)
+                        state.write_text(&node_text(child, source));
+                    }
+                    "identifier" => {
+                        // This is a simple function call (no member access)
+                        state.write_text(&node_text(child, source));
+                    }
+                    "arguments" => {
+                        // Format arguments, keeping simple calls on one line
+                        format_arguments(child, source, state, opts);
+                    }
+                    _ => {
+                        // Handle other components as needed
+                        format_node(child, source, state, opts);
                     }
                 }
             }
 
-            state.write_token(&text, opts);
-
-            // Add space after comma
-            if kind == "," {
-                state.request_space();
+            if is_standalone {
+                state.write_newline();
             }
-
-            is_first = false;
         }
 
-        cursor.goto_parent();
+        "assignment_expression" => {
+            state.write_indent(opts);
+            // Format children individually instead of preserving original formatting
+            let mut first = true;
+            for child in node.children(&mut node.walk()) {
+                match child.kind() {
+                    "variable_declaration" => {
+                        // Handle let variable declarations
+                        state.write_text(&node_text(child, source));
+                        first = false;
+                    }
+                    "identifier" => {
+                        // Handle simple variable names in assignments
+                        if !first {
+                            state.write_text(" ");
+                        }
+                        state.write_text(&node_text(child, source));
+                        first = false;
+                    }
+                    "=" => {
+                        state.write_text(" = ");
+                        first = false;
+                    }
+                    "block" => {
+                        // For assignment values in blocks, check the content
+                        let block_children: Vec<_> = child.children(&mut child.walk()).collect();
+                        if block_children.len() == 1
+                            && matches!(
+                                block_children[0].kind(),
+                                "identifier" | "number" | "string" | "boolean"
+                            )
+                        {
+                            // Simple value, format directly
+                            state.write_text(&node_text(block_children[0], source));
+                        } else {
+                            // Complex expression (like function calls), format normally
+                            // Don't add extra indentation since we're already in an assignment
+                            for block_child in block_children {
+                                format_node(block_child, source, state, opts);
+                            }
+                        }
+                        first = false;
+                    }
+                    _ => {
+                        format_node(child, source, state, opts);
+                        first = false;
+                    }
+                }
+            }
+            state.write_newline();
+        }
+
+        "variable_declaration" => {
+            // This is handled by its parent assignment_expression
+        }
+
+        "assignment" => {
+            state.write_indent(opts);
+            state.write_text(&node_text(node, source));
+            state.write_newline();
+        }
+
+        // Skip these nodes as they are handled by their parents
+        "actor" | "class" | "trait" | "primitive" | "new" | "fun" | "be" | "let" | "var"
+        | "embed" | "identifier" | "parameters" | ":" | "=>" | "val" | "ref" | "iso" | "trn"
+        | "box" | "tag" | "(" | ")" | "=" | "if" | "then" | "end" | "is" | "capability" => {
+            // These are handled by their parent nodes
+        }
+
+        "ERROR" => {
+            // Handle ERROR nodes by processing their children with basic formatting
+            let text = node_text(node, source);
+
+            // Check if this looks like the start of an if statement
+            if text.starts_with("if ") && text.contains("then") {
+                // Format as if statement start
+                state.write_indent(opts);
+                let parts: Vec<&str> = text.splitn(2, "then").collect();
+                if parts.len() == 2 {
+                    state.write_text(&format!("{} then", parts[0].trim()));
+                    state.write_newline();
+                    state.increase_indent();
+                    // Format the rest as body content
+                    if !parts[1].trim().is_empty() {
+                        state.write_indent(opts);
+                        state.write_text(parts[1].trim());
+                    }
+                }
+            } else if text.trim() == "end" || text.ends_with("end") {
+                // Format as if statement end
+                if text.trim() != "end" {
+                    // There's content before "end" (like ")end")
+                    let content = text.trim_end_matches("end").trim();
+                    if !content.is_empty() {
+                        state.write_text(content);
+                        state.write_newline();
+                    }
+                }
+                state.decrease_indent();
+                state.write_indent(opts);
+                state.write_text("end");
+                state.write_newline();
+            } else {
+                // For other ERROR nodes, just format the content with indentation
+                state.write_indent(opts);
+                state.write_text(&text);
+                state.write_newline();
+            }
+        }
+
+        "string" => {
+            // Handle string literals
+            state.write_text(&node_text(node, source));
+        }
+
+        _ => {
+            // For any unhandled nodes, recursively format children
+            for child in node.children(&mut node.walk()) {
+                format_node(child, source, state, opts);
+            }
+        }
     }
+}
+
+fn format_if_block(node: Node, source: &[u8], state: &mut FormatterState, _opts: &FormatOptions) {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            match child.kind() {
+                "if" => {
+                    state.write_text("if ");
+                }
+                "block" => {
+                    // The condition
+                    state.write_text(&node_text(child, source));
+                    state.write_text(" ");
+                }
+                _ => {}
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
+fn format_then_block(node: Node, source: &[u8], state: &mut FormatterState, opts: &FormatOptions) {
+    let mut cursor = node.walk();
+    if cursor.goto_first_child() {
+        loop {
+            let child = cursor.node();
+            match child.kind() {
+                "then" => {
+                    state.write_text("then");
+                    state.write_newline();
+                }
+                "block" => {
+                    // The then body
+                    state.increase_indent();
+                    format_node(child, source, state, opts);
+                    state.decrease_indent();
+                }
+                _ => {}
+            }
+            if !cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
+fn node_text(node: Node, source: &[u8]) -> String {
+    let start = node.start_byte();
+    let end = node.end_byte();
+    String::from_utf8_lossy(&source[start..end]).to_string()
 }
