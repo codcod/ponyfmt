@@ -48,4 +48,16 @@ mod tests {
         let tree = parse(source).unwrap();
         debug_tree(tree.root_node(), source, 0);
     }
+
+    #[test]
+    fn debug_let_statement() {
+        let source = r#"actor Main
+  new val create(env: Env) =>
+    let em = env.out
+    em.print("Hello, pony!")
+"#;
+
+        let tree = parse(source).unwrap();
+        debug_tree(tree.root_node(), source, 0);
+    }
 }
