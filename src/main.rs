@@ -22,7 +22,7 @@ enum Commands {
         /// Paths (files or directories) to format (defaults to current dir)
         paths: Vec<PathBuf>,
         /// Write the formatted content back to the files
-        #[arg(long)]
+        #[arg(long, short = 'w')]
         write: bool,
         /// Check if files are formatted; non-zero exit if changes needed
         #[arg(long)]
