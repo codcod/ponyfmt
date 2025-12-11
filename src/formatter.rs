@@ -129,6 +129,32 @@ fn format_arguments(node: Node, source: &[u8], state: &mut FormatterState, _opts
     state.write_text(")");
 }
 
+fn format_parameters(node: Node, source: &[u8], state: &mut FormatterState, _opts: &FormatOptions) {
+    // Similar to format_arguments but handles parameter declarations
+    let full_text = node_text(node, source);
+
+    // Remove the parentheses and extract the content
+    let content = full_text.strip_prefix('(').unwrap_or(&full_text);
+    let content = content.strip_suffix(')').unwrap_or(content);
+
+    // Split by commas and clean up each parameter
+    let params: Vec<&str> = content
+        .split(',')
+        .map(|param| param.trim())
+        .filter(|param| !param.is_empty())
+        .collect();
+
+    // Write formatted parameters
+    state.write_text("(");
+    for (i, param) in params.iter().enumerate() {
+        if i > 0 {
+            state.write_text(", ");
+        }
+        state.write_text(param);
+    }
+    state.write_text(")");
+}
+
 fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &FormatOptions) {
     match node.kind() {
         "source_file" => {
@@ -197,12 +223,29 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
             state.write_indent(opts);
             state.write_text("use ");
 
-            // Find and format the string literal
-            for child in node.children(&mut node.walk()) {
-                if child.kind() == "string" {
-                    let target_text = node_text(child, source);
-                    state.write_text(&target_text);
-                    break;
+            // Handle different types of use statements
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                // Skip the "use" keyword we already wrote
+                if node_text(cursor.node(), source) == "use" {
+                    cursor.goto_next_sibling();
+                }
+
+                // Format the rest of the use statement
+                while cursor.node().kind() != "" {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "string" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        _ => {
+                            // For complex use statements like @printf[I32](...), format as-is
+                            state.write_text(&node_text(child, source));
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
                 }
             }
             state.write_newline();
@@ -290,6 +333,7 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
         "primitive_definition" => {
             state.write_indent(opts);
 
+            let mut has_members = false;
             // Handle primitive keyword and name
             let mut cursor = node.walk();
             if cursor.goto_first_child() {
@@ -303,6 +347,14 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
                         "identifier" => {
                             state.write_text(&node_text(child, source));
                         }
+                        "members" => {
+                            // Handle primitive members (methods, etc.)
+                            state.write_newline();
+                            state.increase_indent();
+                            format_node(child, source, state, opts);
+                            state.decrease_indent();
+                            has_members = true;
+                        }
                         _ => {}
                     }
                     if !cursor.goto_next_sibling() {
@@ -310,7 +362,11 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
                     }
                 }
             }
-            state.write_newline();
+
+            // Always add newline after primitive (whether it has members or not)
+            if !has_members {
+                state.write_newline();
+            }
         }
 
         "type_definition" => {
@@ -382,8 +438,39 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
         }
         "members" => {
             // Handle members of a type (fields, constructors, functions)
+            let mut prev_significant_kind: Option<&str> = None;
+
             for child in node.children(&mut node.walk()) {
+                let current_kind = child.kind();
+
+                // Skip comments when determining spacing
+                if current_kind == "line_comment" || current_kind == "block_comment" {
+                    format_node(child, source, state, opts);
+                    continue;
+                }
+
+                if let Some(prev) = prev_significant_kind {
+                    let needs_blank_line = match (prev, current_kind) {
+                        // Blank line after the last field, before the first method/constructor
+                        ("field" | "field_definition", "constructor" | "method" | "behavior") => {
+                            true
+                        }
+                        // Blank line between any two methods/constructors/behaviors
+                        (
+                            "constructor" | "method" | "behavior",
+                            "constructor" | "method" | "behavior",
+                        ) => true,
+                        // No blank line between consecutive fields or other cases
+                        _ => false,
+                    };
+
+                    if needs_blank_line {
+                        state.write_blank_line();
+                    }
+                }
+
                 format_node(child, source, state, opts);
+                prev_significant_kind = Some(current_kind);
             }
         }
 
@@ -474,63 +561,13 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
             }
             state.write_newline();
         }
-        "method" => {
+        "method" | "constructor" | "function_definition" | "behavior" => {
             state.write_indent(opts);
 
             let mut cursor = node.walk();
-            if cursor.goto_first_child() {
-                loop {
-                    let child = cursor.node();
-                    match child.kind() {
-                        "fun" => {
-                            state.write_text(&node_text(child, source));
-                            state.write_text(" ");
-                        }
-                        "identifier" => {
-                            state.write_text(&node_text(child, source));
-                        }
-                        "parameters" => {
-                            state.write_text(&node_text(child, source));
-                        }
-                        ":" => {
-                            state.write_text(": ");
-                        }
-                        "base_type" => {
-                            state.write_text(&node_text(child, source));
-                        }
-                        "=>" => {
-                            state.write_text(" =>");
-                        }
-                        "block" => {
-                            // For simple single-expression blocks, keep on same line
-                            let block_text = node_text(child, source);
-                            let trimmed = block_text.trim();
-                            if trimmed.lines().count() == 1 && trimmed.len() < 50 {
-                                // Simple one-liner, keep on same line
-                                state.write_text(" ");
-                                state.write_text(trimmed);
-                            } else {
-                                // Multi-line or complex block, indent
-                                state.write_newline();
-                                state.increase_indent();
-                                format_node(child, source, state, opts);
-                                state.decrease_indent();
-                            }
-                        }
-                        _ => {}
-                    }
-                    if !cursor.goto_next_sibling() {
-                        break;
-                    }
-                }
-            }
-            state.write_newline();
-        }
+            let mut found_colon = false;
+            let mut is_simple_block = false;
 
-        "constructor" | "function_definition" => {
-            state.write_indent(opts);
-
-            let mut cursor = node.walk();
             if cursor.goto_first_child() {
                 loop {
                     let child = cursor.node();
@@ -539,11 +576,7 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
                             state.write_text(&node_text(child, source));
                             state.write_text(" ");
                         }
-                        "val" | "ref" | "iso" | "trn" | "box" | "tag" => {
-                            // Skip - these are handled by their parent capability node
-                        }
                         "capability" => {
-                            // This handles val, ref, iso, trn, box, tag
                             state.write_text(&node_text(child, source));
                             state.write_text(" ");
                         }
@@ -551,40 +584,33 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
                             state.write_text(&node_text(child, source));
                         }
                         "parameters" => {
-                            state.write_text(&node_text(child, source));
+                            format_parameters(child, source, state, opts);
                         }
                         ":" => {
                             state.write_text(": ");
+                            found_colon = true;
                         }
                         "=>" => {
                             state.write_text(" =>");
                         }
                         "block" => {
-                            // Format the method body - always put it on new line and indent
-                            state.write_newline();
-                            state.increase_indent();
-                            format_node(child, source, state, opts);
-                            state.decrease_indent();
+                            let block_text_owned = node_text(child, source);
+                            let block_text = block_text_owned.trim();
+                            is_simple_block = !block_text.contains('\n') && block_text.len() < 50;
+
+                            if is_simple_block {
+                                state.write_text(" ");
+                                state.write_text(block_text);
+                            } else {
+                                state.write_newline();
+                                state.increase_indent();
+                                format_node(child, source, state, opts);
+                                state.decrease_indent();
+                            }
                         }
                         _ => {
-                            // Handle return type annotations
-                            if child.kind() != "new"
-                                && child.kind() != "fun"
-                                && child.kind() != "be"
-                                && child.kind() != "identifier"
-                                && child.kind() != "parameters"
-                                && child.kind() != ":"
-                                && child.kind() != "=>"
-                                && child.kind() != "block"
-                                && child.kind() != "capability"
-                                && child.kind() != "val"
-                                && child.kind() != "ref"
-                                && child.kind() != "iso"
-                                && child.kind() != "trn"
-                                && child.kind() != "box"
-                                && child.kind() != "tag"
-                            {
-                                state.write_text(&node_text(child, source));
+                            if found_colon && child.kind() != "=>" && child.kind() != "block" {
+                                format_node(child, source, state, opts);
                             }
                         }
                     }
@@ -592,6 +618,9 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
                         break;
                     }
                 }
+            }
+            if !is_simple_block {
+                state.write_newline();
             }
         }
 
@@ -626,59 +655,27 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
         }
 
         "block" => {
-            // Check if this is a block of simple assignments that should be on one line
-            let children: Vec<_> = node.children(&mut node.walk()).collect();
-
-            // Check if this block contains only assignment_expression and ; nodes
-            let is_simple_assignments = children
-                .iter()
-                .all(|child| matches!(child.kind(), "assignment_expression" | ";"));
-
-            if is_simple_assignments && children.len() > 2 {
-                // Format multiple assignments on one line
-                state.write_indent(opts);
-                let mut first = true;
-                for child in children {
-                    match child.kind() {
-                        "assignment_expression" => {
-                            if !first {
-                                state.write_text(" ");
-                            }
-                            state.write_text(&node_text(child, source));
-                            first = false;
-                        }
-                        ";" => {
-                            state.write_text(";");
-                        }
-                        _ => {}
-                    }
-                }
-                state.write_newline();
-            } else {
-                // Handle general blocks normally
-                for child in children {
+            // For method bodies and statement blocks, format each child with proper indentation
+            for child in node.children(&mut node.walk()) {
+                // Skip empty nodes that can appear
+                if child.is_named() {
+                    state.write_indent(opts);
                     format_node(child, source, state, opts);
+                    state.write_newline();
                 }
             }
         }
 
         "call_expression" => {
-            // Check if this is a standalone call expression (direct child of block, not part of assignment)
-            let parent = node.parent();
-            let grandparent = parent.and_then(|p| p.parent());
-            let is_standalone = parent.is_none()
-                || (parent.is_some_and(|p| p.kind() == "block")
-                    && grandparent.is_some_and(|gp| !matches!(gp.kind(), "assignment_expression")));
-
-            if is_standalone {
-                state.write_indent(opts);
-            }
-
             // Format function calls more intelligently
             for child in node.children(&mut node.walk()) {
                 match child.kind() {
                     "member_expression" => {
                         // This is the function name (e.g., EmailMessage.create)
+                        state.write_text(&node_text(child, source));
+                    }
+                    "ffi_identifier" => {
+                        // This is an FFI call like @printf
                         state.write_text(&node_text(child, source));
                     }
                     "identifier" => {
@@ -695,58 +692,34 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
                     }
                 }
             }
-
-            if is_standalone {
-                state.write_newline();
-            }
         }
 
         "assignment_expression" => {
+            // Single assignment, format properly
             state.write_indent(opts);
-            // Format children individually instead of preserving original formatting
-            let mut first = true;
-            for child in node.children(&mut node.walk()) {
-                match child.kind() {
-                    "variable_declaration" => {
-                        // Handle let variable declarations
-                        state.write_text(&node_text(child, source));
-                        first = false;
-                    }
-                    "identifier" => {
-                        // Handle simple variable names in assignments
-                        if !first {
-                            state.write_text(" ");
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "variable_declaration" => {
+                            // Handle let/var declarations properly
+                            format_node(child, source, state, opts);
                         }
-                        state.write_text(&node_text(child, source));
-                        first = false;
-                    }
-                    "=" => {
-                        state.write_text(" = ");
-                        first = false;
-                    }
-                    "block" => {
-                        // For assignment values in blocks, check the content
-                        let block_children: Vec<_> = child.children(&mut child.walk()).collect();
-                        if block_children.len() == 1
-                            && matches!(
-                                block_children[0].kind(),
-                                "identifier" | "number" | "string" | "boolean"
-                            )
-                        {
-                            // Simple value, format directly
-                            state.write_text(&node_text(block_children[0], source));
-                        } else {
-                            // Complex expression (like function calls), format normally
-                            // Don't add extra indentation since we're already in an assignment
-                            for block_child in block_children {
-                                format_node(block_child, source, state, opts);
-                            }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
                         }
-                        first = false;
+                        "=" => {
+                            state.write_text(" = ");
+                        }
+                        _ => {
+                            // Format the right-hand side expression
+                            format_node(child, source, state, opts);
+                        }
                     }
-                    _ => {
-                        format_node(child, source, state, opts);
-                        first = false;
+                    if !cursor.goto_next_sibling() {
+                        break;
                     }
                 }
             }
@@ -754,7 +727,32 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
         }
 
         "variable_declaration" => {
-            // This is handled by its parent assignment_expression
+            // Handle let/var declarations
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "let" | "var" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        ":" => {
+                            state.write_text(": ");
+                        }
+                        _ => {
+                            // Type annotations, etc.
+                            format_node(child, source, state, opts);
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
         }
 
         "assignment" => {
@@ -763,10 +761,16 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
             state.write_newline();
         }
 
+        "identifier" => {
+            // Handle identifiers - this is needed for standalone identifiers
+            state.write_text(&node_text(node, source));
+        }
+
         // Skip these nodes as they are handled by their parents
         "actor" | "class" | "trait" | "primitive" | "new" | "fun" | "be" | "let" | "var"
-        | "embed" | "identifier" | "parameters" | ":" | "=>" | "val" | "ref" | "iso" | "trn"
-        | "box" | "tag" | "(" | ")" | "=" | "if" | "then" | "end" | "is" | "capability" => {
+        | "embed" | "parameters" | ":" | "=>" | "val" | "ref" | "iso" | "trn" | "box" | "tag"
+        | "(" | ")" | "=" | "if" | "then" | "end" | "is" | "capability" | "match" | "try"
+        | "else" | "return" | "as" | "." | "string_content" | "\"" => {
             // These are handled by their parent nodes
         }
 
@@ -814,6 +818,273 @@ fn format_node(node: Node, source: &[u8], state: &mut FormatterState, opts: &For
         "string" => {
             // Handle string literals
             state.write_text(&node_text(node, source));
+        }
+
+        "member_expression" => {
+            // Handle member access like Logger.print or msg.original
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "." => {
+                            state.write_text(".");
+                        }
+                        _ => {
+                            format_node(child, source, state, opts);
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        "match_expression" => {
+            state.write_indent(opts);
+
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "match" => {
+                            state.write_text("match ");
+                        }
+                        "end" => {
+                            state.write_indent(opts);
+                            state.write_text("end");
+                            state.write_newline();
+                        }
+                        _ => {
+                            // Handle match expression, cases, etc.
+                            format_node(child, source, state, opts);
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        "match_case" => {
+            state.write_indent(opts);
+            state.write_text("| ");
+
+            let mut cursor = node.walk();
+            let mut found_arrow = false;
+
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "=>" => {
+                            state.write_text(" => ");
+                            found_arrow = true;
+                        }
+                        _ => {
+                            if found_arrow {
+                                // This is the case body
+                                format_node(child, source, state, opts);
+                            } else {
+                                // This is the pattern
+                                state.write_text(&node_text(child, source));
+                            }
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+            state.write_newline();
+        }
+
+        "try_expression" | "try_statement" => {
+            state.write_indent(opts);
+            state.write_text("try");
+            state.write_newline();
+            state.increase_indent();
+
+            // Format the body of the try block
+            for child in node.children(&mut node.walk()) {
+                if child.kind() != "try" && child.kind() != "end" {
+                    format_node(child, source, state, opts);
+                }
+            }
+
+            state.decrease_indent();
+            state.write_indent(opts);
+            state.write_text("end");
+            state.write_newline();
+        }
+
+        "binary_expression" => {
+            // Handle binary expressions like string concatenation
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                let mut first = true;
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "+" | "-" | "*" | "/" | "==" | "!=" | "<" | ">" | "<=" | ">=" | "and"
+                        | "or" => {
+                            state.write_text(" ");
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        _ => {
+                            if !first {
+                                // Operator was already written, this is the right operand
+                                format_node(child, source, state, opts);
+                            } else {
+                                // This is the left operand
+                                format_node(child, source, state, opts);
+                                first = false;
+                            }
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        "expression_statement" => {
+            // Format expression statements with proper indentation
+            state.write_indent(opts);
+            for child in node.children(&mut node.walk()) {
+                format_node(child, source, state, opts);
+            }
+            state.write_newline();
+        }
+
+        "else_clause" => {
+            state.write_indent(opts);
+            state.write_text("else");
+            state.write_newline();
+            state.increase_indent();
+
+            for child in node.children(&mut node.walk()) {
+                if child.kind() != "else" {
+                    format_node(child, source, state, opts);
+                }
+            }
+
+            state.decrease_indent();
+        }
+
+        "return_statement" => {
+            state.write_indent(opts);
+            state.write_text("return");
+
+            // Add return value if present
+            for child in node.children(&mut node.walk()) {
+                if child.kind() != "return" {
+                    state.write_text(" ");
+                    format_node(child, source, state, opts);
+                }
+            }
+            state.write_newline();
+        }
+
+        "as_expression" | "cast_expression" => {
+            // Handle type casting expressions
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "as" => {
+                            state.write_text(" as ");
+                        }
+                        _ => {
+                            format_node(child, source, state, opts);
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        "method_declaration" => {
+            // Handle trait method declarations
+            state.write_indent(opts);
+
+            let mut cursor = node.walk();
+            let mut found_colon = false;
+
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        "fun" | "be" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "capability" => {
+                            state.write_text(&node_text(child, source));
+                            state.write_text(" ");
+                        }
+                        "identifier" => {
+                            state.write_text(&node_text(child, source));
+                        }
+                        "parameters" => {
+                            format_parameters(child, source, state, opts);
+                        }
+                        ":" => {
+                            state.write_text(": ");
+                            found_colon = true;
+                        }
+                        _ => {
+                            // Handle return type annotations
+                            if found_colon {
+                                format_node(child, source, state, opts);
+                            }
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+            state.write_newline();
+        }
+
+        "base_type" => {
+            // Handle type names
+            state.write_text(&node_text(node, source));
+        }
+
+        "parameter" => {
+            // Handle parameter declarations
+            let mut cursor = node.walk();
+            if cursor.goto_first_child() {
+                loop {
+                    let child = cursor.node();
+                    match child.kind() {
+                        ":" => {
+                            state.write_text(": ");
+                        }
+                        _ => {
+                            format_node(child, source, state, opts);
+                        }
+                    }
+                    if !cursor.goto_next_sibling() {
+                        break;
+                    }
+                }
+            }
+        }
+
+        "arguments" => {
+            // Handle function call arguments
+            format_arguments(node, source, state, opts);
         }
 
         _ => {

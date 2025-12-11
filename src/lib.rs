@@ -58,3 +58,6 @@ pub mod formatter;
 
 #[cfg(test)]
 mod debug;
+
+#[cfg(test)]
+mod performance_test;
